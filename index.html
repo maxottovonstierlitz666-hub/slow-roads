@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#87b7d9">
-<title>Slow Roads — бесконечная процедурная дорога</title>
+<title>Slow Roads — бесконечная дорога</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html, body { width:100%; height:100%; overflow:hidden; background:#0b1016; color:#fff;
@@ -16,7 +16,7 @@
   #speed { font-size:34px; font-weight:700; line-height:1; letter-spacing:-1px; }
   #speed span { font-size:12px; font-weight:500; opacity:.75; margin-left:4px; letter-spacing:0; }
   #dist { font-size:12px; opacity:.85; margin-top:5px; }
-  #buttons { display:flex; gap:8px; pointer-events:auto; }
+  #buttons { display:flex; gap:8px; pointer-events:auto; flex-wrap:wrap; justify-content:flex-end; }
   .btn { border:none; background:rgba(12,18,26,.42); color:#fff; backdrop-filter:blur(10px);
     -webkit-backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,.16);
     border-radius:12px; padding:9px 12px; font-size:12px; font-weight:600; cursor:pointer;
@@ -32,20 +32,19 @@
   .key:active { background:rgba(255,255,255,.26); }
   #hint { position:fixed; left:16px; bottom:16px; font-size:12px; opacity:.62; line-height:1.7;
     text-shadow:0 1px 4px rgba(0,0,0,.6); }
-  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
-    background:#0b1016; font-size:14px; letter-spacing:.4px; z-index:10; text-align:center; padding:24px; }
   @media (max-width:820px){ #hint{display:none;} #speed{font-size:28px;} }
 </style>
 </head>
 <body>
+<canvas id="game"></canvas>
+
 <div id="hud">
   <div>
     <div id="speed">0<span>км/ч</span></div>
-    <div id="dist">0 км</div>
+    <div id="dist">0.00 км</div>
   </div>
   <div id="buttons">
     <button class="btn" id="btnTheme">День</button>
-    <button class="btn" id="btnView">Вид</button>
     <button class="btn" id="btnPause">Пауза</button>
   </div>
 </div>
@@ -61,437 +60,154 @@
   </div>
 </div>
 
-<div id="hint">W / ↑ — газ&nbsp;&nbsp;·&nbsp;&nbsp;S / ↓ — тормоз<br>A / D — руль&nbsp;&nbsp;·&nbsp;&nbsp;P — пауза&nbsp;&nbsp;·&nbsp;&nbsp;C — вид</div>
-<div id="loading">Строю дорогу…</div>
+<div id="hint">W / ↑ — газ&nbsp;&nbsp;·&nbsp;&nbsp;S / ↓ — тормоз<br>A / D — руль&nbsp;&nbsp;·&nbsp;&nbsp;P — пауза</div>
 
-<script src="https://unpkg.com/three@0.150.1/build/three.min.js"></script>
 <script>
 (function () {
   'use strict';
-  var T = window.THREE;
-  var loadingEl = document.getElementById('loading');
-  if (!T) {
-    loadingEl.textContent = 'Не удалось загрузить three.js — нужен интернет при открытии.';
-    return;
+
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext('2d');
+  var W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   }
+  resize();
+  window.addEventListener('resize', resize);
 
-  /* ==================== константы мира ==================== */
-  var SEG = 4;            // шаг точек осевой линии, м
-  var ROAD_HALF = 4.2;    // половина ширины полотна (=8.4 м)
-  var AHEAD = 440;        // сколько метров дороги держим впереди
-  var BEHIND = 70;        // сколько метров позади
-  var MAX_SPEED = 46;     // м/с (~165 км/ч)
-  var TREE_STEP = 7;      // шаг «слотов» для деревьев
-  var TREE_CAP = 300;
-  var MAX_PTS = 320;
-  var GROUND_MAX_ROWS = 200;
+  /* ==================== параметры мира ==================== */
+  var SEG_LEN = 200;          // длина сегмента, условных единиц
+  var RUMBLE_LEN = 3;         // сколько сегментов в одной «полосе» покрытия
+  var ROAD_WIDTH = 2000;      // ширина полотна
+  var CAM_HEIGHT = 1000;      // высота камеры над дорогой
+  var FOV = 100;
+  var CAM_DEPTH = 1 / Math.tan((FOV / 2) * Math.PI / 180);
+  var DRAW_DIST = 160;        // сколько сегментов рисуем
 
-  /* ==================== рендерер ==================== */
-  var renderer;
-  try {
-    renderer = new T.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-  } catch (e) {
-    loadingEl.textContent = 'Браузер не поддерживает WebGL.';
-    return;
+  var MAX_SPEED = SEG_LEN * 55;   // ~200 км/ч в пересчёте HUD
+  var ACCEL = MAX_SPEED / 6;
+  var BRAKING = -MAX_SPEED / 1.8;
+  var DECEL = -MAX_SPEED / 14;
+  var OFF_ROAD_DECEL = -MAX_SPEED / 2.2;
+  var OFF_ROAD_LIMIT = MAX_SPEED / 4;
+  var CENTRIFUGAL = 0.32;
+  var FOG_STEPS = 16;
+
+  /* ==================== процедурная дорога ==================== */
+  // Кривизна и высота — гладкие функции от номера сегмента.
+  // Ничего не храним: дорога бесконечна в обе стороны и не занимает память.
+  function curveAt(i) {
+    return 2.6 * Math.sin(i * 0.0089 + 0.4) +
+           1.3 * Math.sin(i * 0.0031 + 2.1) +
+           0.45 * Math.sin(i * 0.023 + 5.0);
   }
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  if (T.sRGBEncoding !== undefined) renderer.outputEncoding = T.sRGBEncoding;
-  document.body.appendChild(renderer.domElement);
-
-  var scene = new T.Scene();
-  var camera = new T.PerspectiveCamera(64, window.innerWidth / window.innerHeight, 0.4, 1400);
-  scene.fog = new T.Fog(0xcde7f7, 130, 520);
-
-  /* ==================== небо ==================== */
-  var skyUniforms = {
-    top: { value: new T.Color(0x4a90d9) },
-    bot: { value: new T.Color(0xcde7f7) }
-  };
-  var sky = new T.Mesh(
-    new T.SphereGeometry(700, 24, 16),
-    new T.ShaderMaterial({
-      uniforms: skyUniforms,
-      side: T.BackSide,
-      depthWrite: false,
-      vertexShader: [
-        'varying vec3 vPos;',
-        'void main(){ vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }'
-      ].join('\n'),
-      fragmentShader: [
-        'uniform vec3 top; uniform vec3 bot; varying vec3 vPos;',
-        'void main(){',
-        '  float h = clamp(normalize(vPos).y * 0.5 + 0.5, 0.0, 1.0);',
-        '  vec3 c = mix(bot, top, pow(h, 0.9));',
-        '  gl_FragColor = vec4(c, 1.0);',
-        '}'
-      ].join('\n')
-    })
-  );
-  sky.renderOrder = -1;
-  scene.add(sky);
-
-  /* ==================== свет ==================== */
-  var hemi = new T.HemisphereLight(0xcfe8ff, 0x4c6b3f, 0.9);
-  scene.add(hemi);
-  var sun = new T.DirectionalLight(0xfff6e0, 1.5);
-  sun.position.set(-90, 130, 70);
-  scene.add(sun);
-  var ambient = new T.AmbientLight(0xffffff, 0.25);
-  scene.add(ambient);
-
-  /* ==================== генерация дороги ==================== */
-  function curvature(s) {
-    return 0.0034 * Math.sin(s * 0.0039 + 0.7) +
-           0.0058 * Math.sin(s * 0.0016 + 2.3) +
-           0.0024 * Math.sin(s * 0.0111 + 4.1);
+  function yAt(i) {
+    return 3200 * Math.sin(i * 0.0042 + 0.9) +
+           1500 * Math.sin(i * 0.0113 + 2.4);
   }
-  function roadHeight(s) {
-    return 2.0 * Math.sin(s * 0.0031 + 0.4) +
-           1.0 * Math.sin(s * 0.0079 + 1.9) +
-           0.4 * Math.sin(s * 0.0213);
-  }
-  function makePoint(s, prev) {
-    if (!prev) return { s: s, x: 0, y: roadHeight(s), z: 0, h: 0 };
-    var ds = s - prev.s;
-    var h = prev.h + curvature(prev.s) * ds;
-    return {
-      s: s,
-      x: prev.x + Math.sin(h) * ds,
-      y: roadHeight(s),
-      z: prev.z + Math.cos(h) * ds,
-      h: h
-    };
-  }
-
-  var pts = [makePoint(0, null)];
-
-  function ensureRoad(sCar) {
-    var added = false;
-    var guard = 0;
-    while (pts[pts.length - 1].s < sCar + AHEAD && guard++ < 400) {
-      var last = pts[pts.length - 1];
-      if (pts.length >= MAX_PTS) { pts.shift(); }
-      pts.push(makePoint(last.s + SEG, last));
-      added = true;
-    }
-    while (pts.length > 4 && pts[1].s < sCar - BEHIND) {
-      pts.shift();
-      added = true;
-    }
-    return added;
-  }
-
-  function pointAt(s) {
-    var n = pts.length;
-    if (n === 0) return { x: 0, y: 0, z: 0, h: 0, s: 0 };
-    var raw = (s - pts[0].s) / SEG;
-    var i0 = Math.floor(raw);
-    if (i0 < 0) i0 = 0;
-    if (i0 > n - 1) i0 = n - 1;
-    var a = pts[i0];
-    var b = pts[Math.min(n - 1, i0 + 1)];
-    var t = 0;
-    if (b.s > a.s) t = (s - a.s) / (b.s - a.s);
-    if (t < 0) t = 0;
-    if (t > 1) t = 1;
-    return {
-      x: a.x + (b.x - a.x) * t,
-      y: a.y + (b.y - a.y) * t,
-      z: a.z + (b.z - a.z) * t,
-      h: a.h + (b.h - a.h) * t,
-      s: s
-    };
-  }
-
-  /* ==================== текстура асфальта ==================== */
-  function makeRoadTexture() {
-    var w = 128, h = 512;
-    var c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
-    var g = c.getContext('2d');
-    g.fillStyle = '#5b5f64';
-    g.fillRect(0, 0, w, h);
-    for (var i = 0; i < 3200; i++) {
-      var x = Math.random() * w, y = Math.random() * h, v = Math.random();
-      g.fillStyle = v > 0.5
-        ? 'rgba(255,255,255,' + (0.03 + v * 0.06) + ')'
-        : 'rgba(0,0,0,' + (0.04 + v * 0.08) + ')';
-      g.fillRect(x, y, 2, 2);
-    }
-    g.fillStyle = '#e9e9e0';
-    g.fillRect(8, 0, 4, h);
-    g.fillRect(w - 12, 0, 4, h);
-    g.fillStyle = '#f2efe4';
-    g.fillRect(w / 2 - 2, 0, 4, h * 0.46);
-    var tex = new T.CanvasTexture(c);
-    tex.wrapS = T.ClampToEdgeWrapping;
-    tex.wrapT = T.RepeatWrapping;
-    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    if (T.sRGBEncoding !== undefined) tex.encoding = T.sRGBEncoding;
-    return tex;
-  }
-
-  /* ==================== дорожное полотно ==================== */
-  var roadGeo = new T.BufferGeometry();
-  var roadPosArr = new Float32Array(MAX_PTS * 6);
-  var roadUvArr = new Float32Array(MAX_PTS * 4);
-  var roadIdxArr = new Uint32Array((MAX_PTS - 1) * 6);
-  (function () {
-    for (var i = 0; i < MAX_PTS - 1; i++) {
-      var a = i * 2, b = i * 2 + 1, c = (i + 1) * 2, d = (i + 1) * 2 + 1, o = i * 6;
-      roadIdxArr[o] = a; roadIdxArr[o + 1] = b; roadIdxArr[o + 2] = c;
-      roadIdxArr[o + 3] = b; roadIdxArr[o + 4] = d; roadIdxArr[o + 5] = c;
-    }
-  })();
-  var roadPosAttr = new T.BufferAttribute(roadPosArr, 3);
-  var roadUvAttr = new T.BufferAttribute(roadUvArr, 2);
-  roadPosAttr.setUsage(T.DynamicDrawUsage);
-  roadUvAttr.setUsage(T.DynamicDrawUsage);
-  roadGeo.setAttribute('position', roadPosAttr);
-  roadGeo.setAttribute('uv', roadUvAttr);
-  roadGeo.setIndex(new T.BufferAttribute(roadIdxArr, 1));
-  roadGeo.setDrawRange(0, 0);
-
-  var roadMat = new T.MeshLambertMaterial({ map: makeRoadTexture(), flatShading: true });
-  var roadMesh = new T.Mesh(roadGeo, roadMat);
-  roadMesh.frustumCulled = false;
-  scene.add(roadMesh);
-
-  function buildRoad() {
-    var n = Math.min(pts.length, MAX_PTS);
-    for (var i = 0; i < n; i++) {
-      var p = pts[i];
-      var cx = Math.cos(p.h) * ROAD_HALF;
-      var cz = -Math.sin(p.h) * ROAD_HALF;
-      var o = i * 6;
-      roadPosArr[o] = p.x + cx;
-      roadPosArr[o + 1] = p.y;
-      roadPosArr[o + 2] = p.z + cz;
-      roadPosArr[o + 3] = p.x - cx;
-      roadPosArr[o + 4] = p.y;
-      roadPosArr[o + 5] = p.z - cz;
-      var u = i * 4;
-      roadUvArr[u] = 0; roadUvArr[u + 1] = p.s / 8;
-      roadUvArr[u + 2] = 1; roadUvArr[u + 3] = p.s / 8;
-    }
-    roadPosAttr.needsUpdate = true;
-    roadUvAttr.needsUpdate = true;
-    roadGeo.setDrawRange(0, Math.max(0, (n - 1) * 6));
-  }
-
-  /* ==================== земля и холмы ==================== */
-  var OFFS = [-170, -125, -90, -62, -42, -28, -17, -9, -ROAD_HALF,
-              ROAD_HALF, 9, 17, 28, 42, 62, 90, 125, 170];
-  var M = OFFS.length;
-
-  function groundHeight(offset, s, ry) {
-    var a = Math.abs(offset);
-    if (a <= ROAD_HALF + 0.01) return ry - 0.07;
-    var d = a - ROAD_HALF;
-    var ramp = Math.min(1, d / 14);
-    var n1 = Math.sin(s * 0.0105 + a * 0.045) * 0.5 +
-             Math.sin(s * 0.0042 - a * 0.021 + 2.0) * 0.5;
-    var far = Math.max(0, a - 45) * 0.18;
-    return ry - 0.07 + ramp * ramp * (2.6 + n1 * 3.4) + far;
-  }
-
-  var groundGeo = new T.BufferGeometry();
-  var gPosArr = new Float32Array(GROUND_MAX_ROWS * M * 3);
-  var gColArr = new Float32Array(GROUND_MAX_ROWS * M * 3);
-  var gIdxArr = new Uint32Array((GROUND_MAX_ROWS - 1) * (M - 1) * 6);
-  (function () {
-    var o = 0;
-    for (var r = 0; r < GROUND_MAX_ROWS - 1; r++) {
-      for (var m = 0; m < M - 1; m++) {
-        var a = r * M + m, b = r * M + m + 1, c = (r + 1) * M + m, d = (r + 1) * M + m + 1;
-        gIdxArr[o++] = a; gIdxArr[o++] = c; gIdxArr[o++] = b;
-        gIdxArr[o++] = b; gIdxArr[o++] = c; gIdxArr[o++] = d;
-      }
-    }
-  })();
-  var gPosAttr = new T.BufferAttribute(gPosArr, 3);
-  var gColAttr = new T.BufferAttribute(gColArr, 3);
-  gPosAttr.setUsage(T.DynamicDrawUsage);
-  gColAttr.setUsage(T.DynamicDrawUsage);
-  groundGeo.setAttribute('position', gPosAttr);
-  groundGeo.setAttribute('color', gColAttr);
-  groundGeo.setIndex(new T.BufferAttribute(gIdxArr, 1));
-  groundGeo.setDrawRange(0, 0);
-
-  var groundMat = new T.MeshLambertMaterial({ color: 0x5d8a44, vertexColors: true, flatShading: true });
-  var groundMesh = new T.Mesh(groundGeo, groundMat);
-  groundMesh.frustumCulled = false;
-  scene.add(groundMesh);
-
-  function buildGround() {
-    var rows = [];
-    for (var i = 0; i < pts.length; i += 2) rows.push(pts[i]);
-    if (rows.length === 0) return;
-    if (rows[rows.length - 1] !== pts[pts.length - 1]) rows.push(pts[pts.length - 1]);
-    var R = Math.min(rows.length, GROUND_MAX_ROWS);
-    for (var r = 0; r < R; r++) {
-      var p = rows[r];
-      for (var m = 0; m < M; m++) {
-        var off = OFFS[m];
-        var cx = Math.cos(p.h) * off;
-        var cz = -Math.sin(p.h) * off;
-        var k = (r * M + m) * 3;
-        gPosArr[k] = p.x + cx;
-        gPosArr[k + 1] = groundHeight(off, p.s, p.y);
-        gPosArr[k + 2] = p.z + cz;
-        var v = 0.84 + ((Math.sin(p.s * 0.31 + m * 1.7) + 1) * 0.5) * 0.24;
-        gColArr[k] = v;
-        gColArr[k + 1] = v;
-        gColArr[k + 2] = v;
-      }
-    }
-    gPosAttr.needsUpdate = true;
-    gColAttr.needsUpdate = true;
-    groundGeo.setDrawRange(0, Math.max(0, (R - 1) * (M - 1) * 6));
-  }
-
-  /* ==================== деревья ==================== */
-  var trunkGeo = new T.CylinderGeometry(0.16, 0.26, 2.0, 6);
-  trunkGeo.translate(0, 1.0, 0);
-  var crownGeo = new T.ConeGeometry(1.5, 4.2, 7);
-  crownGeo.translate(0, 3.9, 0);
-
-  var trunkMat = new T.MeshLambertMaterial({ color: 0x6b4a33, flatShading: true });
-  var crownMat = new T.MeshLambertMaterial({ color: 0x2f6b3a, flatShading: true });
-
-  var trunks = new T.InstancedMesh(trunkGeo, trunkMat, TREE_CAP);
-  var crowns = new T.InstancedMesh(crownGeo, crownMat, TREE_CAP);
-  trunks.frustumCulled = false;
-  crowns.frustumCulled = false;
-  trunks.count = 0;
-  crowns.count = 0;
-  scene.add(trunks);
-  scene.add(crowns);
-
   function hash(n) {
     var x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
     return x - Math.floor(x);
   }
 
-  var dummy = new T.Object3D();
-
-  function buildTrees(sCar) {
-    var from = Math.floor((sCar - BEHIND) / TREE_STEP);
-    var to = Math.floor((sCar + AHEAD * 0.85) / TREE_STEP);
-    var count = 0;
-    for (var k = from; k <= to && count < TREE_CAP; k++) {
-      var r1 = hash(k), r2 = hash(k + 0.37), r3 = hash(k + 1.71), r4 = hash(k + 2.93);
-      if (r1 > 0.62) continue;
-      var s = k * TREE_STEP + r3 * TREE_STEP;
-      var side = r2 < 0.5 ? -1 : 1;
-      var off = side * (12 + r4 * r4 * 46);
-      var p = pointAt(s);
-      var y = groundHeight(off, s, p.y);
-      var sc = 0.75 + hash(k + 4.4) * 0.85;
-      dummy.position.set(p.x + Math.cos(p.h) * off, y - 0.2, p.z - Math.sin(p.h) * off);
-      dummy.rotation.set(0, hash(k + 5.1) * Math.PI * 2, 0);
-      dummy.scale.set(sc, sc, sc);
-      dummy.updateMatrix();
-      trunks.setMatrixAt(count, dummy.matrix);
-      crowns.setMatrixAt(count, dummy.matrix);
-      count++;
+  /* ==================== темы ==================== */
+  var THEMES = [
+    {
+      name: 'День',
+      skyTop: '#4a90d9', skyBot: '#cfe7f7', sun: '#fff9e6', sunY: 0.22,
+      grass1: '#4f7c3c', grass2: '#477236',
+      road1: '#5d6166', road2: '#565a5f',
+      rumble1: '#e8e8df', rumble2: '#d8d8cf',
+      line: '#f2efe4',
+      crown: '#2f6b3a', crown2: '#255630', trunk: '#5b3f2b',
+      mount1: '#6d8f7a', mount2: '#87a894',
+      stars: false
+    },
+    {
+      name: 'Закат',
+      skyTop: '#2f3f6d', skyBot: '#f6ab74', sun: '#fff0c4', sunY: 0.42,
+      grass1: '#5c6c3a', grass2: '#536234',
+      road1: '#565258', road2: '#4f4b52',
+      rumble1: '#e6d2b8', rumble2: '#d3bfa6',
+      line: '#f4e6cd',
+      crown: '#3c5c3a', crown2: '#2e4a2e', trunk: '#4a3423',
+      mount1: '#40406b', mount2: '#5c5a84',
+      stars: false
+    },
+    {
+      name: 'Ночь',
+      skyTop: '#050a16', skyBot: '#16233d', sun: '#e9f0ff', sunY: 0.2,
+      grass1: '#22331f', grass2: '#1d2b1a',
+      road1: '#3a3d44', road2: '#34373d',
+      rumble1: '#8d8f93', rumble2: '#7c7e82',
+      line: '#b9bcc2',
+      crown: '#16301c', crown2: '#102415', trunk: '#2a1e14',
+      mount1: '#101a2c', mount2: '#182740',
+      stars: true
     }
-    trunks.count = count;
-    crowns.count = count;
-    trunks.instanceMatrix.needsUpdate = true;
-    crowns.instanceMatrix.needsUpdate = true;
+  ];
+  var themeIdx = 0;
+  var TBL = null;
+
+  function hexToRgb(h) {
+    return [
+      parseInt(h.slice(1, 3), 16),
+      parseInt(h.slice(3, 5), 16),
+      parseInt(h.slice(5, 7), 16)
+    ];
+  }
+  function makeRamp(base, fogc) {
+    var b = hexToRgb(base);
+    var f = hexToRgb(fogc);
+    var arr = [];
+    for (var k = 0; k < FOG_STEPS; k++) {
+      var t = k / (FOG_STEPS - 1);
+      arr.push('rgb(' +
+        Math.round(b[0] + (f[0] - b[0]) * t) + ',' +
+        Math.round(b[1] + (f[1] - b[1]) * t) + ',' +
+        Math.round(b[2] + (f[2] - b[2]) * t) + ')');
+    }
+    return arr;
   }
 
-  /* ==================== машина ==================== */
-  var car = new T.Group();
-  var bodyMat = new T.MeshLambertMaterial({ color: 0xd6483f, flatShading: true });
-  var glassMat = new T.MeshLambertMaterial({ color: 0x1d2733, flatShading: true });
-  var tireMat = new T.MeshLambertMaterial({ color: 0x15171a, flatShading: true });
-
-  var body = new T.Mesh(new T.BoxGeometry(1.9, 0.52, 4.1), bodyMat);
-  body.position.y = 0.66;
-  car.add(body);
-
-  var cabin = new T.Mesh(new T.BoxGeometry(1.62, 0.5, 1.85), glassMat);
-  cabin.position.set(0, 1.13, -0.2);
-  car.add(cabin);
-
-  var roof = new T.Mesh(new T.BoxGeometry(1.66, 0.1, 1.7), bodyMat);
-  roof.position.set(0, 1.4, -0.2);
-  car.add(roof);
-
-  var wheelGeo = new T.CylinderGeometry(0.36, 0.36, 0.3, 14);
-  wheelGeo.rotateZ(Math.PI / 2);
-  var wheels = [];
-  var wheelPos = [[-0.92, 1.35], [0.92, 1.35], [-0.92, -1.35], [0.92, -1.35]];
-  for (var wi = 0; wi < wheelPos.length; wi++) {
-    var w = new T.Mesh(wheelGeo, tireMat);
-    w.position.set(wheelPos[wi][0], 0.38, wheelPos[wi][1]);
-    car.add(w);
-    wheels.push(w);
+  function buildTables() {
+    var t = THEMES[themeIdx];
+    TBL = {
+      grass: [makeRamp(t.grass1, t.skyBot), makeRamp(t.grass2, t.skyBot)],
+      road: [makeRamp(t.road1, t.skyBot), makeRamp(t.road2, t.skyBot)],
+      rumble: [makeRamp(t.rumble1, t.skyBot), makeRamp(t.rumble2, t.skyBot)],
+      line: makeRamp(t.line, t.skyBot),
+      crown: makeRamp(t.crown, t.skyBot),
+      crown2: makeRamp(t.crown2, t.skyBot),
+      trunk: makeRamp(t.trunk, t.skyBot)
+    };
+    document.getElementById('btnTheme').textContent = t.name;
   }
-  scene.add(car);
-
-  var shadow = new T.Mesh(
-    new T.CircleGeometry(1.75, 24),
-    new T.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.2, depthWrite: false })
-  );
-  shadow.rotation.x = -Math.PI / 2;
-  shadow.scale.set(1, 1.45, 1);
-  scene.add(shadow);
+  buildTables();
 
   /* ==================== состояние ==================== */
-  var sCar = 12;
+  var position = 0;
   var speed = 0;
-  var off = 0;
-  var yaw = 0;
-  var yawOffset = 0;
-  var pitch = 0;
-  var roll = 0;
+  var playerX = 0;
   var paused = false;
-  var viewMode = 0;
+  var skyShift = 0;
   var keys = { up: false, down: false, left: false, right: false };
 
   var hudSpeed = document.getElementById('speed');
   var hudDist = document.getElementById('dist');
   var btnPause = document.getElementById('btnPause');
-  var btnView = document.getElementById('btnView');
-  var btnTheme = document.getElementById('btnTheme');
-
-  /* ==================== темы ==================== */
-  var THEMES = [
-    { name: 'День', skyTop: 0x4a90d9, skyBot: 0xcde7f7, fog: 0xcde7f7,
-      hemiSky: 0xcfe8ff, hemiGround: 0x4c6b3f, sun: 0xfff6e0, sunI: 1.5,
-      ambI: 0.25, grass: 0x5d8a44, crown: 0x2f6b3a },
-    { name: 'Закат', skyTop: 0x2f3f6d, skyBot: 0xf6ab74, fog: 0xeba57e,
-      hemiSky: 0xffc9a0, hemiGround: 0x4a3a33, sun: 0xffab66, sunI: 1.35,
-      ambI: 0.2, grass: 0x6a7a3e, crown: 0x365f36 },
-    { name: 'Ночь', skyTop: 0x04070f, skyBot: 0x1a2842, fog: 0x16223a,
-      hemiSky: 0x33507a, hemiGround: 0x14201a, sun: 0x9fc0ff, sunI: 0.6,
-      ambI: 0.16, grass: 0x2c3f2c, crown: 0x1d3a26 }
-  ];
-  var themeIdx = 0;
-
-  function applyTheme(i) {
-    var t = THEMES[i];
-    skyUniforms.top.value.setHex(t.skyTop);
-    skyUniforms.bot.value.setHex(t.skyBot);
-    scene.fog.color.setHex(t.fog);
-    hemi.color.setHex(t.hemiSky);
-    hemi.groundColor.setHex(t.hemiGround);
-    sun.color.setHex(t.sun);
-    sun.intensity = t.sunI;
-    ambient.intensity = t.ambI;
-    groundMat.color.setHex(t.grass);
-    crownMat.color.setHex(t.crown);
-    btnTheme.textContent = t.name;
-  }
 
   /* ==================== ввод ==================== */
   var KEYMAP = {
-    arrowup: 'up', w: 'up', u: 'up', 'ц': 'up',
+    arrowup: 'up', w: 'up', 'ц': 'up',
     arrowdown: 'down', s: 'down', 'ы': 'down',
     arrowleft: 'left', a: 'left', 'ф': 'left',
     arrowright: 'right', d: 'right', 'в': 'right'
@@ -501,182 +217,360 @@
     var k = (e.key || '').toLowerCase();
     if (KEYMAP[k]) { keys[KEYMAP[k]] = true; e.preventDefault(); return; }
     if (k === 'p' || k === 'escape' || k === 'з') { togglePause(); e.preventDefault(); }
-    if (k === 'c' || k === 'с') { toggleView(); e.preventDefault(); }
   });
-
   window.addEventListener('keyup', function (e) {
     var k = (e.key || '').toLowerCase();
     if (KEYMAP[k]) { keys[KEYMAP[k]] = false; e.preventDefault(); }
   });
 
-  function bindTouch() {
+  (function bindTouch() {
     var els = document.querySelectorAll('.key');
     for (var i = 0; i < els.length; i++) {
       (function (el) {
         var k = el.getAttribute('data-k');
         var on = function (ev) { ev.preventDefault(); keys[k] = true; };
-        var offFn = function (ev) { ev.preventDefault(); keys[k] = false; };
+        var off = function (ev) { ev.preventDefault(); keys[k] = false; };
         el.addEventListener('pointerdown', on);
-        el.addEventListener('pointerup', offFn);
-        el.addEventListener('pointercancel', offFn);
-        el.addEventListener('pointerleave', offFn);
+        el.addEventListener('pointerup', off);
+        el.addEventListener('pointercancel', off);
+        el.addEventListener('pointerleave', off);
       })(els[i]);
     }
     if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) {
       document.getElementById('touch').style.display = 'flex';
     }
-  }
-  bindTouch();
+  })();
 
   function togglePause() {
     paused = !paused;
     btnPause.textContent = paused ? 'Дальше' : 'Пауза';
   }
-  function toggleView() {
-    viewMode = viewMode === 0 ? 1 : 0;
-    btnView.textContent = viewMode === 0 ? 'Вид' : 'Капот';
-    camInit = false;
-  }
-
   btnPause.addEventListener('click', togglePause);
-  btnView.addEventListener('click', toggleView);
-  btnTheme.addEventListener('click', function () {
+  document.getElementById('btnTheme').addEventListener('click', function () {
     themeIdx = (themeIdx + 1) % THEMES.length;
-    applyTheme(themeIdx);
+    buildTables();
   });
 
-  window.addEventListener('resize', function () {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
-
-  /* ==================== обновление ==================== */
-  var camInit = false;
-  var tmpFwd = new T.Vector3();
-  var tmpDesired = new T.Vector3();
-  var tmpLook = new T.Vector3();
-  var tmpUp = new T.Vector3(0, 1, 0);
-  var hudAcc = 0;
-
+  /* ==================== физика ==================== */
   function update(dt) {
-    if (!paused) {
-      var accel = 13, brake = 26;
-      if (keys.up) speed += accel * dt * (1 - Math.min(1, speed / MAX_SPEED) * 0.55);
-      if (keys.down) speed -= brake * dt;
-      if (!keys.up && !keys.down) speed -= speed * 0.55 * dt;
-      speed -= speed * 0.02 * dt;
-      if (speed > MAX_SPEED) speed = MAX_SPEED;
-      if (speed < -6) speed = -6;
+    if (paused) return;
+    var base = Math.floor(position / SEG_LEN);
+    var curve = curveAt(base);
+    var speedPercent = speed / MAX_SPEED;
 
-      var steer = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
-      var steerPower = 1.0 + Math.min(1, Math.abs(speed) / 14) * 2.2;
-      off += steer * steerPower * dt * (speed >= 0 ? 1 : -1);
-      var limit = ROAD_HALF + 1.2;
-      if (off > limit) off = limit;
-      if (off < -limit) off = -limit;
+    var dx = dt * 2 * speedPercent;
+    if (keys.left) playerX -= dx;
+    if (keys.right) playerX += dx;
+    playerX -= dx * speedPercent * curve * CENTRIFUGAL;
 
-      if (Math.abs(off) > ROAD_HALF - 0.3) speed -= speed * 0.85 * dt;
+    if (keys.up) speed += ACCEL * dt;
+    else if (keys.down) speed += BRAKING * dt;
+    else speed += DECEL * dt;
 
-      sCar += speed * dt;
-      if (sCar < 0) { sCar = 0; if (speed < 0) speed = 0; }
-
-      var targetOffset = steer * 0.22 * Math.min(1, Math.abs(speed) / 9) * (speed >= 0 ? 1 : -1);
-      yawOffset += (targetOffset - yawOffset) * Math.min(1, dt * 7);
+    if ((playerX < -1 || playerX > 1) && speed > OFF_ROAD_LIMIT) {
+      speed += OFF_ROAD_DECEL * dt;
     }
 
-    var p = pointAt(sCar);
-    var ahead = pointAt(sCar + 3);
-    var behind = pointAt(sCar - 3);
+    if (speed > MAX_SPEED) speed = MAX_SPEED;
+    if (speed < 0) speed = 0;
 
-    var rightX = Math.cos(p.h);
-    var rightZ = -Math.sin(p.h);
-    car.position.set(p.x + rightX * off, p.y + 0.02, p.z + rightZ * off);
+    position += speed * dt;
+    if (playerX < -2) playerX = -2;
+    if (playerX > 2) playerX = 2;
 
-    yaw = p.h + yawOffset;
-    var slope = (ahead.y - behind.y) / 6;
-    var targetPitch = -Math.atan(slope);
-    pitch += (targetPitch - pitch) * Math.min(1, dt * 6);
-    var targetRoll = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
-    targetRoll = -targetRoll * 0.05 * Math.min(1, Math.abs(speed) / 20);
-    roll += (targetRoll - roll) * Math.min(1, dt * 6);
-
-    car.rotation.set(0, 0, 0);
-    car.rotateY(yaw);
-    car.rotateX(pitch);
-    car.rotateZ(roll);
-
-    shadow.position.set(car.position.x, p.y + 0.04, car.position.z);
-
-    var spin = speed * dt / 0.36;
-    for (var i = 0; i < wheels.length; i++) wheels[i].rotation.x += spin;
-
-    /* камера */
-    tmpFwd.set(Math.sin(yaw), 0, Math.cos(yaw));
-
-    if (viewMode === 0) {
-      var dist = 9.5 + speed * 0.08;
-      var height = 4.0 + speed * 0.02;
-      tmpDesired.copy(car.position).addScaledVector(tmpFwd, -dist);
-      tmpDesired.y += height;
-      if (!camInit) { camera.position.copy(tmpDesired); camInit = true; }
-      camera.position.lerp(tmpDesired, 1 - Math.exp(-dt * 3.2));
-      tmpLook.copy(car.position).addScaledVector(tmpFwd, 10);
-      tmpLook.y += 1.1;
-    } else {
-      tmpDesired.copy(car.position).addScaledVector(tmpFwd, 0.9);
-      tmpDesired.y += 1.45;
-      if (!camInit) { camera.position.copy(tmpDesired); camInit = true; }
-      camera.position.lerp(tmpDesired, 1 - Math.exp(-dt * 14));
-      tmpLook.copy(car.position).addScaledVector(tmpFwd, 40);
-      tmpLook.y += 1.1;
-    }
-    camera.lookAt(tmpLook);
-
-    var targetFov = 62 + (Math.abs(speed) / MAX_SPEED) * 12;
-    camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 3);
-    camera.updateProjectionMatrix();
-
-    sky.position.copy(camera.position);
-
-    hudAcc += dt;
-    if (hudAcc > 0.1) {
-      hudAcc = 0;
-      hudSpeed.innerHTML = Math.round(Math.abs(speed) * 3.6) + '<span>км/ч</span>';
-      hudDist.textContent = (sCar / 1000).toFixed(2) + ' км';
-    }
+    skyShift += curve * speed * dt * 0.00002;
   }
 
-  /* ==================== запуск ==================== */
-  applyTheme(0);
-  ensureRoad(sCar);
-  buildRoad();
-  buildGround();
-  buildTrees(sCar);
-  update(0);
-  loadingEl.style.display = 'none';
+  /* ==================== рисование ==================== */
+  function project(z, worldY, worldX, camY, camX) {
+    var scale = CAM_DEPTH / z;
+    return {
+      scale: scale,
+      x: W / 2 + scale * (worldX - camX) * W / 2,
+      y: H / 2 - scale * (worldY - camY) * H / 2,
+      w: scale * ROAD_WIDTH * W / 2
+    };
+  }
 
+  function poly(pts, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function fogIndex(k) {
+    var v = Math.round(k * (FOG_STEPS - 1));
+    if (v < 0) v = 0;
+    if (v > FOG_STEPS - 1) v = FOG_STEPS - 1;
+    return v;
+  }
+
+  function drawSky(horizonY) {
+    var t = THEMES[themeIdx];
+    var grad = ctx.createLinearGradient(0, 0, 0, Math.max(horizonY, 1));
+    grad.addColorStop(0, t.skyTop);
+    grad.addColorStop(1, t.skyBot);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // звёзды
+    if (t.stars) {
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      for (var i = 0; i < 90; i++) {
+        var sx = (hash(i * 3.1) * W + skyShift * 20) % W;
+        if (sx < 0) sx += W;
+        var sy = hash(i * 7.7) * Math.max(horizonY * 0.9, 10);
+        var r = hash(i * 1.3) * 1.3 + 0.4;
+        ctx.fillRect(sx, sy, r, r);
+      }
+    }
+
+    // солнце / луна
+    var sunX = W / 2 - skyShift * 60;
+    var sunY = H * t.sunY;
+    var sunR = Math.min(W, H) * 0.055;
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = t.sun;
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 0.18;
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, sunR * 2.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // дальние горы
+    drawMountains(horizonY, t.mount2, 0.55, 70, 0.004);
+    drawMountains(horizonY, t.mount1, 1.0, 110, 0.009);
+  }
+
+  function drawMountains(horizonY, color, ampK, heightPx, freq) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(0, horizonY + 4);
+    var step = Math.max(14, W / 60);
+    for (var x = 0; x <= W + step; x += step) {
+      var phase = (x + skyShift * 260 * ampK) * freq;
+      var h = (Math.sin(phase) * 0.5 + Math.sin(phase * 2.3 + 1.7) * 0.3 +
+               Math.sin(phase * 0.6 + 3.1) * 0.4);
+      var y = horizonY - (heightPx * ampK) * (0.55 + h * 0.45);
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, horizonY + 4);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawTree(x, groundY, size, fi, seed) {
+    // ствол
+    var trunkW = Math.max(1, size * 0.07);
+    ctx.fillStyle = TBL.trunk[fi];
+    ctx.fillRect(x - trunkW / 2, groundY - size * 0.32, trunkW, size * 0.32);
+
+    // крона — два яруса
+    var crownColor = seed > 0.5 ? TBL.crown[fi] : TBL.crown2[fi];
+    ctx.fillStyle = crownColor;
+
+    var w1 = size * 0.30;
+    ctx.beginPath();
+    ctx.moveTo(x, groundY - size);
+    ctx.lineTo(x + w1, groundY - size * 0.42);
+    ctx.lineTo(x - w1, groundY - size * 0.42);
+    ctx.closePath();
+    ctx.fill();
+
+    var w2 = size * 0.38;
+    ctx.beginPath();
+    ctx.moveTo(x, groundY - size * 0.72);
+    ctx.lineTo(x + w2, groundY - size * 0.14);
+    ctx.lineTo(x - w2, groundY - size * 0.14);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function render() {
+    var base = Math.floor(position / SEG_LEN);
+    var basePercent = (position - base * SEG_LEN) / SEG_LEN;
+    var playerY = yAt(base) + (yAt(base + 1) - yAt(base)) * basePercent;
+    var camY = playerY + CAM_HEIGHT;
+    var camX = playerX * ROAD_WIDTH;
+
+    var horizonY = H * 0.42;
+    drawSky(horizonY);
+
+    var maxy = H;
+    var x = 0;
+    var dx = -(curveAt(base) * basePercent);
+    var trees = [];
+
+    for (var n = 0; n < DRAW_DIST; n++) {
+      var i = base + n;
+      var curve = curveAt(i);
+      var z1 = i * SEG_LEN - position;
+      var z2 = (i + 1) * SEG_LEN - position;
+      if (z1 < 40) continue;
+
+      var p1 = project(z1, yAt(i), x, camY, camX);
+      var p2 = project(z2, yAt(i + 1), x + dx, camY, camX);
+
+      x += dx;
+      dx += curve;
+
+      if (p2.y >= p1.y) continue;
+      if (p2.y >= maxy) continue;
+
+      var fogK = Math.min(1, Math.pow(n / DRAW_DIST, 1.25));
+      var fi = fogIndex(fogK);
+      var dark = Math.floor(i / RUMBLE_LEN) % 2 === 0 ? 0 : 1;
+
+      // трава
+      ctx.fillStyle = TBL.grass[dark][fi];
+      ctx.fillRect(0, p2.y, W, p1.y - p2.y + 1);
+
+      // обочина шире полотна
+      var r1 = p1.w * 1.10, r2 = p2.w * 1.10;
+      poly([[p1.x - r1, p1.y], [p1.x + r1, p1.y],
+            [p2.x + r2, p2.y], [p2.x - r2, p2.y]], TBL.rumble[dark][fi]);
+
+      // полотно
+      poly([[p1.x - p1.w, p1.y], [p1.x + p1.w, p1.y],
+            [p2.x + p2.w, p2.y], [p2.x - p2.w, p2.y]], TBL.road[dark][fi]);
+
+      // центральная прерывистая разметка
+      if (Math.floor(i / RUMBLE_LEN) % 2 === 0) {
+        var lw1 = Math.max(0.6, p1.w * 0.022);
+        var lw2 = Math.max(0.4, p2.w * 0.022);
+        poly([[p1.x - lw1, p1.y], [p1.x + lw1, p1.y],
+              [p2.x + lw2, p2.y], [p2.x - lw2, p2.y]], TBL.line[fi]);
+      }
+
+      // краевые линии
+      if (p1.w > 3) {
+        var ew1 = Math.max(0.5, p1.w * 0.016);
+        var ew2 = Math.max(0.4, p2.w * 0.016);
+        var off1 = p1.w * 0.93, off2 = p2.w * 0.93;
+        poly([[p1.x - off1 - ew1, p1.y], [p1.x - off1 + ew1, p1.y],
+              [p2.x - off2 + ew2, p2.y], [p2.x - off2 - ew2, p2.y]], TBL.line[fi]);
+        poly([[p1.x + off1 - ew1, p1.y], [p1.x + off1 + ew1, p1.y],
+              [p2.x + off2 + ew2, p2.y], [p2.x + off2 - ew2, p2.y]], TBL.line[fi]);
+      }
+
+      // деревья вдоль дороги
+      if (n > 2 && hash(i) < 0.42) {
+        var side = hash(i + 0.5) < 0.5 ? -1 : 1;
+        var offsetK = 1.35 + hash(i + 1.7) * 2.4;
+        trees.push({
+          x: p1.x + side * offsetK * p1.w,
+          y: p1.y,
+          size: p1.w * (0.85 + hash(i + 3.3) * 0.5),
+          fi: fi,
+          seed: hash(i + 5.1),
+          depth: n
+        });
+      }
+
+      maxy = p1.y;
+    }
+
+    // деревья — от дальних к ближним
+    for (var t = trees.length - 1; t >= 0; t--) {
+      var tr = trees[t];
+      if (tr.size < 1.2) continue;
+      drawTree(tr.x, tr.y, tr.size, tr.fi, tr.seed);
+    }
+
+    // машина игрока
+    drawPlayer();
+  }
+
+  function drawPlayer() {
+    var base = Math.floor(position / SEG_LEN);
+    var yB = yAt(base);
+    var speedK = speed / MAX_SPEED;
+    var carW = Math.min(W * 0.26, 150);
+    var carH = carW * 0.42;
+    var cx = W / 2;
+    var cy = H * 0.93;
+
+    // тень
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + carH * 0.55, carW * 0.55, carH * 0.22, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // кузов
+    var bodyGrad = ctx.createLinearGradient(cx, cy - carH, cx, cy + carH);
+    bodyGrad.addColorStop(0, '#e2564c');
+    bodyGrad.addColorStop(1, '#a8332c');
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.moveTo(cx - carW / 2, cy + carH * 0.42);
+    ctx.lineTo(cx - carW * 0.40, cy - carH * 0.22);
+    ctx.lineTo(cx + carW * 0.40, cy - carH * 0.22);
+    ctx.lineTo(cx + carW / 2, cy + carH * 0.42);
+    ctx.closePath();
+    ctx.fill();
+
+    // крыша
+    ctx.fillStyle = '#1d2733';
+    ctx.beginPath();
+    ctx.moveTo(cx - carW * 0.28, cy - carH * 0.20);
+    ctx.lineTo(cx - carW * 0.20, cy - carH * 0.60);
+    ctx.lineTo(cx + carW * 0.20, cy - carH * 0.60);
+    ctx.lineTo(cx + carW * 0.28, cy - carH * 0.20);
+    ctx.closePath();
+    ctx.fill();
+
+    // блик на крыше
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(cx - carW * 0.17, cy - carH * 0.58, carW * 0.34, carH * 0.08);
+
+    // задние фонари
+    ctx.fillStyle = '#ff6b5e';
+    ctx.fillRect(cx - carW * 0.46, cy + carH * 0.10, carW * 0.14, carH * 0.12);
+    ctx.fillRect(cx + carW * 0.32, cy + carH * 0.10, carW * 0.14, carH * 0.12);
+
+    // колёса
+    ctx.fillStyle = '#14161a';
+    ctx.fillRect(cx - carW * 0.52, cy + carH * 0.18, carW * 0.10, carH * 0.34);
+    ctx.fillRect(cx + carW * 0.42, cy + carH * 0.18, carW * 0.10, carH * 0.34);
+
+    // «дым» из-под колёс на скорости
+    if (speedK > 0.55) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.05 + speedK * 0.05) + ')';
+      var dustW = carW * (0.5 + Math.sin(performance.now() * 0.006) * 0.15);
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + carH * 0.5, dustW, carH * 0.12, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    void yB;
+  }
+
+  /* ==================== HUD ==================== */
+  var hudAcc = 0;
+  function updateHud(dt) {
+    hudAcc += dt;
+    if (hudAcc < 0.1) return;
+    hudAcc = 0;
+    var kmh = Math.round((speed / MAX_SPEED) * 200);
+    hudSpeed.innerHTML = kmh + '<span>км/ч</span>';
+    hudDist.textContent = (position * 0.000005).toFixed(2) + ' км';
+  }
+
+  /* ==================== главный цикл ==================== */
   var last = performance.now();
-  var buildAcc = 0;
-
   function frame(now) {
     var dt = (now - last) / 1000;
     last = now;
-    if (dt > 0.08) dt = 0.08;
+    if (dt > 0.05) dt = 0.05;
     if (dt < 0) dt = 0;
-
-    var changed = ensureRoad(sCar);
     update(dt);
-
-    buildAcc += dt;
-    if (buildAcc > 0.12 || changed) {
-      buildAcc = 0;
-      buildRoad();
-      buildGround();
-      buildTrees(sCar);
-    }
-
-    renderer.render(scene, camera);
+    render();
+    updateHud(dt);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

@@ -12,18 +12,19 @@
   canvas { display:block; }
   #hud { position:fixed; top:0; left:0; right:0; padding:14px 16px; display:flex;
     justify-content:space-between; align-items:flex-start; pointer-events:none;
-    text-shadow:0 1px 6px rgba(0,0,0,.55); }
+    text-shadow:0 1px 6px rgba(0,0,0,.55); z-index:3; }
   #speed { font-size:34px; font-weight:700; line-height:1; letter-spacing:-1px; }
   #speed span { font-size:12px; font-weight:500; opacity:.75; margin-left:4px; letter-spacing:0; }
   #dist { font-size:12px; opacity:.85; margin-top:5px; }
-  #buttons { display:flex; gap:8px; pointer-events:auto; flex-wrap:wrap; justify-content:flex-end; }
+  #reg { font-size:11px; opacity:.65; margin-top:3px; }
+  #buttons { display:flex; gap:8px; pointer-events:auto; flex-wrap:wrap; justify-content:flex-end; max-width:64%; }
   .btn { border:none; background:rgba(12,18,26,.42); color:#fff; backdrop-filter:blur(10px);
     -webkit-backdrop-filter:blur(10px); border:1px solid rgba(255,255,255,.16);
     border-radius:12px; padding:9px 12px; font-size:12px; font-weight:600; cursor:pointer;
-    font-family:inherit; }
+    font-family:inherit; white-space:nowrap; }
   .btn:active { transform:scale(.95); }
   #touch { position:fixed; left:0; right:0; bottom:0; padding:16px 18px calc(18px + env(safe-area-inset-bottom));
-    display:none; justify-content:space-between; gap:14px; pointer-events:none; }
+    display:none; justify-content:space-between; gap:14px; pointer-events:none; z-index:3; }
   .pad { display:flex; gap:12px; pointer-events:auto; }
   .key { width:64px; height:64px; border-radius:18px; background:rgba(12,18,26,.42);
     border:1px solid rgba(255,255,255,.16); backdrop-filter:blur(10px);
@@ -31,7 +32,12 @@
     font-size:22px; user-select:none; -webkit-user-select:none; touch-action:none; }
   .key:active { background:rgba(255,255,255,.26); }
   #hint { position:fixed; left:16px; bottom:16px; font-size:12px; opacity:.62; line-height:1.7;
-    text-shadow:0 1px 4px rgba(0,0,0,.6); }
+    text-shadow:0 1px 4px rgba(0,0,0,.6); z-index:2; }
+  #center { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    pointer-events:none; z-index:4; }
+  #pausedTag { display:none; background:rgba(10,14,20,.6); border:1px solid rgba(255,255,255,.2);
+    border-radius:14px; padding:12px 20px; font-size:15px; font-weight:600; letter-spacing:.4px;
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
   @media (max-width:820px){ #hint{display:none;} #speed{font-size:28px;} }
 </style>
 </head>
@@ -42,9 +48,12 @@
   <div>
     <div id="speed">0<span>км/ч</span></div>
     <div id="dist">0.00 км</div>
+    <div id="reg">регион 1</div>
   </div>
   <div id="buttons">
     <button class="btn" id="btnTheme">День</button>
+    <button class="btn" id="btnWeather">Погода</button>
+    <button class="btn" id="btnLand">Регион</button>
     <button class="btn" id="btnPause">Пауза</button>
   </div>
 </div>
@@ -59,6 +68,8 @@
     <div class="key" data-k="up">▲</div>
   </div>
 </div>
+
+<div id="center"><div id="pausedTag">Пауза</div></div>
 
 <div id="hint">W / ↑ — газ&nbsp;&nbsp;·&nbsp;&nbsp;S / ↓ — тормоз<br>A / D — руль&nbsp;&nbsp;·&nbsp;&nbsp;P — пауза</div>
 
@@ -84,26 +95,26 @@
   window.addEventListener('resize', resize);
 
   /* ==================== параметры мира ==================== */
-  var SEG_LEN = 200;          // длина сегмента, условных единиц
-  var RUMBLE_LEN = 3;         // сколько сегментов в одной «полосе» покрытия
+  var SEG_LEN = 200;          // длина сегмента
+  var RUMBLE_LEN = 3;         // сегментов в одной «полосе» покрытия
   var ROAD_WIDTH = 2000;      // ширина полотна
-  var CAM_HEIGHT = 1000;      // высота камеры над дорогой
+  var CAM_HEIGHT = 1000;      // высота камеры
   var FOV = 100;
   var CAM_DEPTH = 1 / Math.tan((FOV / 2) * Math.PI / 180);
-  var DRAW_DIST = 160;        // сколько сегментов рисуем
-
-  var MAX_SPEED = SEG_LEN * 55;   // ~200 км/ч в пересчёте HUD
-  var ACCEL = MAX_SPEED / 6;
-  var BRAKING = -MAX_SPEED / 1.8;
-  var DECEL = -MAX_SPEED / 14;
-  var OFF_ROAD_DECEL = -MAX_SPEED / 2.2;
-  var OFF_ROAD_LIMIT = MAX_SPEED / 4;
-  var CENTRIFUGAL = 0.32;
+  var DRAW_DIST = 170;        // сколько сегментов рисуем
   var FOG_STEPS = 16;
 
+  var MAX_SPEED = SEG_LEN * 55;
+  var ACCEL = MAX_SPEED / 7;
+  var BRAKING = -MAX_SPEED / 1.9;
+  var DECEL = -MAX_SPEED / 15;
+  var OFF_ROAD_DECEL = -MAX_SPEED / 2.2;
+  var OFF_ROAD_LIMIT = MAX_SPEED / 4;
+  var CENTRIFUGAL = 0.30;
+
   /* ==================== процедурная дорога ==================== */
-  // Кривизна и высота — гладкие функции от номера сегмента.
-  // Ничего не храним: дорога бесконечна в обе стороны и не занимает память.
+  // Всё — гладкие функции от номера сегмента: дорога бесконечна в обе стороны,
+  // ничего не хранится в памяти, поэтому мир можно генерировать «на лету» вечно.
   function curveAt(i) {
     return 2.6 * Math.sin(i * 0.0089 + 0.4) +
            1.3 * Math.sin(i * 0.0031 + 2.1) +
@@ -118,10 +129,20 @@
     return x - Math.floor(x);
   }
 
-  /* ==================== темы ==================== */
-  var THEMES = [
+  /* ==================== профили покрытия ==================== */
+  // Профиль = функция поперечного смещения + цвет. Позволяет иметь разные типы трасс.
+  var PROFILES = {
+    two: { roadK: 1.00, rumbleK: 1.10, edge: 0.93, center: true, centerStyle: 'dash' },
+    highway: { roadK: 1.25, rumbleK: 1.32, edge: 0.95, center: true, centerStyle: 'dash' },
+    dirt: { roadK: 0.92, rumbleK: 1.00, edge: 0.90, center: false, centerStyle: 'none' },
+    oneway: { roadK: 0.80, rumbleK: 0.90, edge: 0.90, center: true, centerStyle: 'solid' }
+  };
+
+  /* ==================== регионы (ландшафт + цвет) ==================== */
+  var REGIONS = [
     {
-      name: 'День',
+      name: 'Луга',
+      profile: 'two',
       skyTop: '#4a90d9', skyBot: '#cfe7f7', sun: '#fff9e6', sunY: 0.22,
       grass1: '#4f7c3c', grass2: '#477236',
       road1: '#5d6166', road2: '#565a5f',
@@ -129,33 +150,83 @@
       line: '#f2efe4',
       crown: '#2f6b3a', crown2: '#255630', trunk: '#5b3f2b',
       mount1: '#6d8f7a', mount2: '#87a894',
-      stars: false
+      stars: false,
+      treeKind: 'pine', treeDensity: 0.42, hillAmp: 1.0
     },
     {
-      name: 'Закат',
-      skyTop: '#2f3f6d', skyBot: '#f6ab74', sun: '#fff0c4', sunY: 0.42,
-      grass1: '#5c6c3a', grass2: '#536234',
-      road1: '#565258', road2: '#4f4b52',
-      rumble1: '#e6d2b8', rumble2: '#d3bfa6',
-      line: '#f4e6cd',
-      crown: '#3c5c3a', crown2: '#2e4a2e', trunk: '#4a3423',
-      mount1: '#40406b', mount2: '#5c5a84',
-      stars: false
+      name: 'Пустыня',
+      profile: 'dirt',
+      skyTop: '#e4994a', skyBot: '#f7d9a0', sun: '#fff3cf', sunY: 0.30,
+      grass1: '#c9a468', grass2: '#c19a5c',
+      road1: '#b08a55', road2: '#a9824f',
+      rumble1: '#d6b67c', rumble2: '#cbab72',
+      line: '#e8d6a8',
+      crown: '#7c8b4a', crown2: '#697a3d', trunk: '#7a5a35',
+      mount1: '#b98f5e', mount2: '#cda878',
+      stars: false,
+      treeKind: 'cactus', treeDensity: 0.18, hillAmp: 0.6
     },
     {
-      name: 'Ночь',
-      skyTop: '#050a16', skyBot: '#16233d', sun: '#e9f0ff', sunY: 0.2,
-      grass1: '#22331f', grass2: '#1d2b1a',
-      road1: '#3a3d44', road2: '#34373d',
-      rumble1: '#8d8f93', rumble2: '#7c7e82',
-      line: '#b9bcc2',
-      crown: '#16301c', crown2: '#102415', trunk: '#2a1e14',
-      mount1: '#101a2c', mount2: '#182740',
-      stars: true
+      name: 'Хвойный лес',
+      profile: 'two',
+      skyTop: '#5d7f9e', skyBot: '#cddbe2', sun: '#f5f8e8', sunY: 0.20,
+      grass1: '#3a5a33', grass2: '#334f2c',
+      road1: '#55585c', road2: '#4e5155',
+      rumble1: '#dedecd', rumble2: '#cfcfbd',
+      line: '#eae7d8',
+      crown: '#1f4a2a', crown2: '#173d22', trunk: '#4a3423',
+      mount1: '#3f5a4a', mount2: '#536d5a',
+      stars: false,
+      treeKind: 'fir', treeDensity: 0.85, hillAmp: 1.4
+    },
+    {
+      name: 'Стель',
+      profile: 'oneway',
+      skyTop: '#3f6f9c', skyBot: '#e8dcc0', sun: '#fff2cd', sunY: 0.26,
+      grass1: '#8a8a4a', grass2: '#7e7e42',
+      road1: '#59554f', road2: '#524e48',
+      rumble1: '#d9d2b8', rumble2: '#c8c1a7',
+      line: '#efe7cd',
+      crown: '#5d6b32', crown2: '#4c5929', trunk: '#54402a',
+      mount1: '#7a7a55', mount2: '#93936a',
+      stars: false,
+      treeKind: 'pine', treeDensity: 0.12, hillAmp: 1.1
+    },
+    {
+      name: 'Север',
+      profile: 'two',
+      skyTop: '#1e3a5f', skyBot: '#9fc3d8', sun: '#eef6ff', sunY: 0.18,
+      grass1: '#c9d6d8', grass2: '#bccbcd',
+      road1: '#4b4f55', road2: '#45494f',
+      rumble1: '#e8ecef', rumble2: '#d6dcdf',
+      line: '#f4f7f9',
+      crown: '#25453a', crown2: '#1b352c', trunk: '#3c2e22',
+      mount1: '#8aa3b3', mount2: '#a9bdc9',
+      stars: false,
+      treeKind: 'fir', treeDensity: 0.30, hillAmp: 1.8
     }
   ];
-  var themeIdx = 0;
+
+  /* ==================== погода ==================== */
+  var WEATHERS = [
+    { name: 'Ясно', fogK: 1.00, darken: 0, rain: 0, snow: 0, wind: 0.0 },
+    { name: 'Туман', fogK: 0.42, darken: 0.10, rain: 0, snow: 0, wind: 0.0 },
+    { name: 'Дождь', fogK: 0.62, darken: 0.26, rain: 1, snow: 0, wind: 1.4 },
+    { name: 'Снег', fogK: 0.55, darken: 0.12, rain: 0, snow: 1, wind: 0.5 }
+  ];
+
+  /* ==================== темы времени суток ==================== */
+  var TIMES = [
+    { name: 'День', darken: 0.0, tint: 'rgba(0,0,0,0)' },
+    { name: 'Закат', darken: 0.18, tint: 'rgba(255,120,40,0.16)' },
+    { name: 'Ночь', darken: 0.52, tint: 'rgba(20,35,70,0.42)' }
+  ];
+
+  var regionIdx = 0;
+  var weatherIdx = 0;
+  var timeIdx = 0;
   var TBL = null;
+  var skyFog = '#cfe7f7';
 
   function hexToRgb(h) {
     return [
@@ -164,33 +235,51 @@
       parseInt(h.slice(5, 7), 16)
     ];
   }
-  function makeRamp(base, fogc) {
+  function mixRgb(a, b, t) {
+    return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * t) + ',' +
+                    Math.round(a[1] + (b[1] - a[1]) * t) + ',' +
+                    Math.round(a[2] + (b[2] - a[2]) * t) + ')';
+  }
+  function makeRamp(base, fogc, darken) {
     var b = hexToRgb(base);
     var f = hexToRgb(fogc);
+    // затемнение умножает базу на коэффициент (ночь/дождь)
+    var k = 1 - darken;
+    b = [b[0] * k, b[1] * k, b[2] * k];
     var arr = [];
-    for (var k = 0; k < FOG_STEPS; k++) {
-      var t = k / (FOG_STEPS - 1);
-      arr.push('rgb(' +
-        Math.round(b[0] + (f[0] - b[0]) * t) + ',' +
-        Math.round(b[1] + (f[1] - b[1]) * t) + ',' +
-        Math.round(b[2] + (f[2] - b[2]) * t) + ')');
+    for (var i = 0; i < FOG_STEPS; i++) {
+      var t = i / (FOG_STEPS - 1);
+      arr.push(mixRgb(b, f, t));
     }
     return arr;
   }
 
   function buildTables() {
-    var t = THEMES[themeIdx];
+    var r = REGIONS[regionIdx];
+    var w = WEATHERS[weatherIdx];
+    var t = TIMES[timeIdx];
+    var dark = w.darken + t.darken;
+    skyFog = mixRgb(hexToRgb(r.skyBot), hexToRgb('#3a4657'), Math.min(0.55, dark * 0.9));
+
+    // туман сокращает дальность видимости
+    var vis = Math.max(24, Math.round(DRAW_DIST * w.fogK));
+    DRAW_FOG = vis;
+
     TBL = {
-      grass: [makeRamp(t.grass1, t.skyBot), makeRamp(t.grass2, t.skyBot)],
-      road: [makeRamp(t.road1, t.skyBot), makeRamp(t.road2, t.skyBot)],
-      rumble: [makeRamp(t.rumble1, t.skyBot), makeRamp(t.rumble2, t.skyBot)],
-      line: makeRamp(t.line, t.skyBot),
-      crown: makeRamp(t.crown, t.skyBot),
-      crown2: makeRamp(t.crown2, t.skyBot),
-      trunk: makeRamp(t.trunk, t.skyBot)
+      grass: [makeRamp(r.grass1, skyFog, dark), makeRamp(r.grass2, skyFog, dark)],
+      road: [makeRamp(r.road1, skyFog, dark), makeRamp(r.road2, skyFog, dark)],
+      rumble: [makeRamp(r.rumble1, skyFog, dark), makeRamp(r.rumble2, skyFog, dark)],
+      line: makeRamp(r.line, skyFog, dark),
+      crown: makeRamp(r.crown, skyFog, dark),
+      crown2: makeRamp(r.crown2, skyFog, dark),
+      trunk: makeRamp(r.trunk, skyFog, dark)
     };
     document.getElementById('btnTheme').textContent = t.name;
+    document.getElementById('btnWeather').textContent = w.name;
+    document.getElementById('btnLand').textContent = r.name;
+    document.getElementById('reg').textContent = 'регион ' + (regionIdx + 1) + ' · ' + r.name;
   }
+  var DRAW_FOG = DRAW_DIST;
   buildTables();
 
   /* ==================== состояние ==================== */
@@ -199,11 +288,15 @@
   var playerX = 0;
   var paused = false;
   var skyShift = 0;
+  var shiftK = 0;             // мгновенный боковой сдвиг (для руля, визуальный)
   var keys = { up: false, down: false, left: false, right: false };
+
+  var particles = [];         // капли дождя/снежинки
 
   var hudSpeed = document.getElementById('speed');
   var hudDist = document.getElementById('dist');
   var btnPause = document.getElementById('btnPause');
+  var pausedTag = document.getElementById('pausedTag');
 
   /* ==================== ввод ==================== */
   var KEYMAP = {
@@ -229,7 +322,8 @@
       (function (el) {
         var k = el.getAttribute('data-k');
         var on = function (ev) { ev.preventDefault(); keys[k] = true; };
-        var off = function (ev) { ev.preventDefault(); keys[k] = false; };
+        var off = function (ev) { e0(ev); keys[k] = false; };
+        function e0(ev) { ev.preventDefault(); }
         el.addEventListener('pointerdown', on);
         el.addEventListener('pointerup', off);
         el.addEventListener('pointercancel', off);
@@ -244,44 +338,124 @@
   function togglePause() {
     paused = !paused;
     btnPause.textContent = paused ? 'Дальше' : 'Пауза';
+    pausedTag.style.display = paused ? 'block' : 'none';
   }
   btnPause.addEventListener('click', togglePause);
+
   document.getElementById('btnTheme').addEventListener('click', function () {
-    themeIdx = (themeIdx + 1) % THEMES.length;
+    timeIdx = (timeIdx + 1) % TIMES.length;
+    buildTables();
+  });
+  document.getElementById('btnWeather').addEventListener('click', function () {
+    weatherIdx = (weatherIdx + 1) % WEATHERS.length;
+    particles.length = 0;
+    buildTables();
+  });
+  document.getElementById('btnLand').addEventListener('click', function () {
+    regionIdx = (regionIdx + 1) % REGIONS.length;
+    particles.length = 0;
     buildTables();
   });
 
   /* ==================== физика ==================== */
   function update(dt) {
     if (paused) return;
+
     var base = Math.floor(position / SEG_LEN);
     var curve = curveAt(base);
     var speedPercent = speed / MAX_SPEED;
+    var r = REGIONS[regionIdx];
+    var prof = PROFILES[r.profile];
 
     var dx = dt * 2 * speedPercent;
-    if (keys.left) playerX -= dx;
-    if (keys.right) playerX += dx;
+    var steer = 0;
+    if (keys.left) steer -= dx;
+    if (keys.right) steer += dx;
+    playerX += steer;
+    // центробежная сила выносит наружу поворота
     playerX -= dx * speedPercent * curve * CENTRIFUGAL;
 
     if (keys.up) speed += ACCEL * dt;
     else if (keys.down) speed += BRAKING * dt;
     else speed += DECEL * dt;
 
-    if ((playerX < -1 || playerX > 1) && speed > OFF_ROAD_LIMIT) {
+    var roadHalf = prof.edge;   // за этой границей — уже обочина/земля
+    var offRoad = Math.abs(playerX) > roadHalf;
+    if (offRoad) {
       speed += OFF_ROAD_DECEL * dt;
+      if (speed > OFF_ROAD_LIMIT) speed = OFF_ROAD_LIMIT;
     }
 
     if (speed > MAX_SPEED) speed = MAX_SPEED;
     if (speed < 0) speed = 0;
 
     position += speed * dt;
-    if (playerX < -2) playerX = -2;
-    if (playerX > 2) playerX = 2;
+    if (playerX < -2.4) playerX = -2.4;
+    if (playerX > 2.4) playerX = 2.4;
 
     skyShift += curve * speed * dt * 0.00002;
+
+    // визуальный сдвиг камеры при рулении
+    var targetShift = steer * 6;
+    shiftK += (targetShift - shiftK) * Math.min(1, dt * 8);
+
+    updateParticles(dt, speedPercent);
   }
 
-  /* ==================== рисование ==================== */
+  /* ==================== погодные частицы ==================== */
+  function updateParticles(dt, sp) {
+    var w = WEATHERS[weatherIdx];
+    var kind = w.rain ? 'rain' : (w.snow ? 'snow' : null);
+    if (!kind) { if (particles.length) particles.length = 0; return; }
+
+    var want = kind === 'rain' ? 140 : 90;
+    while (particles.length < want) {
+      particles.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        z: 0.35 + Math.random() * 0.9,       // «глубина»: ближе — быстрее и крупнее
+        a: Math.random() * Math.PI * 2
+      });
+    }
+    while (particles.length > want) particles.pop();
+
+    var boost = 1 + sp * 2.2;
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      p.y += (kind === 'rain' ? 900 : 90) * p.z * boost * dt * (1 + w.wind * 0.2);
+      p.x += (kind === 'rain' ? 120 : 40) * w.wind * p.z * dt +
+             (kind === 'snow' ? Math.sin(p.a + performance.now() * 0.001) * 26 * dt : 0);
+      if (p.y > H + 20) { p.y = -20; p.x = Math.random() * W; }
+      if (p.x > W + 20) p.x = -20;
+      if (p.x < -20) p.x = W + 20;
+    }
+  }
+
+  function drawParticles() {
+    var w = WEATHERS[weatherIdx];
+    if (!w.rain && !w.snow) return;
+    ctx.save();
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      if (w.rain) {
+        var len = 10 + p.z * 22;
+        ctx.strokeStyle = 'rgba(200,225,255,' + (0.10 + p.z * 0.22) + ')';
+        ctx.lineWidth = 0.7 + p.z * 1.4;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - len * 0.25, p.y + len);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = 'rgba(255,255,255,' + (0.35 + p.z * 0.5) + ')';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 0.9 + p.z * 2.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /* ==================== проекция ==================== */
   function project(z, worldY, worldX, camY, camX) {
     var scale = CAM_DEPTH / z;
     return {
@@ -308,44 +482,49 @@
     return v;
   }
 
+  /* ==================== небо ==================== */
   function drawSky(horizonY) {
-    var t = THEMES[themeIdx];
+    var r = REGIONS[regionIdx];
+    var w = WEATHERS[weatherIdx];
+    var t = TIMES[timeIdx];
+
+    var top = mixRgb(hexToRgb(r.skyTop), hexToRgb('#2c3a4d'), Math.min(0.7, w.darken * 1.6 + t.darken));
+    var bot = skyFog;
+
     var grad = ctx.createLinearGradient(0, 0, 0, Math.max(horizonY, 1));
-    grad.addColorStop(0, t.skyTop);
-    grad.addColorStop(1, t.skyBot);
+    grad.addColorStop(0, top);
+    grad.addColorStop(1, bot);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
 
-    // звёзды
-    if (t.stars) {
+    // звёзды — только ночью и только при ясной погоде
+    if (t.name === 'Ночь' && weatherIdx === 0) {
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      for (var i = 0; i < 90; i++) {
+      for (var i = 0; i < 110; i++) {
         var sx = (hash(i * 3.1) * W + skyShift * 20) % W;
         if (sx < 0) sx += W;
         var sy = hash(i * 7.7) * Math.max(horizonY * 0.9, 10);
-        var r = hash(i * 1.3) * 1.3 + 0.4;
-        ctx.fillRect(sx, sy, r, r);
+        var rad = hash(i * 1.3) * 1.3 + 0.4;
+        ctx.fillRect(sx, sy, rad, rad);
       }
     }
 
-    // солнце / луна
-    var sunX = W / 2 - skyShift * 60;
-    var sunY = H * t.sunY;
-    var sunR = Math.min(W, H) * 0.055;
-    ctx.globalAlpha = 0.9;
-    ctx.fillStyle = t.sun;
-    ctx.beginPath();
-    ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 0.18;
-    ctx.beginPath();
-    ctx.arc(sunX, sunY, sunR * 2.1, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+    // солнце/луна
+    if (!(w.rain || w.snow) || t.name === 'Ночь') {
+      var sunX = W / 2 - skyShift * 60;
+      var sunY = H * r.sunY;
+      var sunR = Math.min(W, H) * 0.05;
+      ctx.globalAlpha = t.name === 'Ночь' ? 0.55 : 0.9;
+      ctx.fillStyle = t.name === 'Ночь' ? '#dfe9ff' : r.sun;
+      ctx.beginPath(); ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 0.16;
+      ctx.beginPath(); ctx.arc(sunX, sunY, sunR * 2.2, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
 
-    // дальние горы
-    drawMountains(horizonY, t.mount2, 0.55, 70, 0.004);
-    drawMountains(horizonY, t.mount1, 1.0, 110, 0.009);
+    // горы
+    drawMountains(horizonY, mixRgb(hexToRgb(r.mount2), hexToRgb(skyFog), 0.45 + w.darken * 0.4), 0.55, 70, 0.004);
+    drawMountains(horizonY, mixRgb(hexToRgb(r.mount1), hexToRgb(skyFog), 0.22 + w.darken * 0.5), 1.0, 110, 0.009);
   }
 
   function drawMountains(horizonY, color, ampK, heightPx, freq) {
@@ -353,51 +532,80 @@
     ctx.beginPath();
     ctx.moveTo(0, horizonY + 4);
     var step = Math.max(14, W / 60);
+    var amp = heightPx * ampK * REGIONS[regionIdx].hillAmp;
     for (var x = 0; x <= W + step; x += step) {
       var phase = (x + skyShift * 260 * ampK) * freq;
       var h = (Math.sin(phase) * 0.5 + Math.sin(phase * 2.3 + 1.7) * 0.3 +
                Math.sin(phase * 0.6 + 3.1) * 0.4);
-      var y = horizonY - (heightPx * ampK) * (0.55 + h * 0.45);
-      ctx.lineTo(x, y);
+      ctx.lineTo(x, horizonY - amp * (0.55 + h * 0.45));
     }
     ctx.lineTo(W, horizonY + 4);
     ctx.closePath();
     ctx.fill();
   }
 
-  function drawTree(x, groundY, size, fi, seed) {
-    // ствол
+  /* ==================== деревья ==================== */
+  function drawTree(x, groundY, size, fi, seed, kind) {
+    if (size < 1.2) return;
     var trunkW = Math.max(1, size * 0.07);
     ctx.fillStyle = TBL.trunk[fi];
+
+    if (kind === 'cactus') {
+      ctx.fillRect(x - trunkW * 1.1, groundY - size * 0.7, trunkW * 2.2, size * 0.7);
+      ctx.fillRect(x - size * 0.22, groundY - size * 0.52, size * 0.14, size * 0.24);
+      ctx.fillRect(x + size * 0.08, groundY - size * 0.62, size * 0.14, size * 0.30);
+      ctx.fillStyle = seed > 0.5 ? TBL.crown[fi] : TBL.crown2[fi];
+      ctx.fillRect(x - trunkW * 0.6, groundY - size * 0.68, trunkW * 1.2, size * 0.64);
+      return;
+    }
+
+    // ствол
     ctx.fillRect(x - trunkW / 2, groundY - size * 0.32, trunkW, size * 0.32);
 
-    // крона — два яруса
     var crownColor = seed > 0.5 ? TBL.crown[fi] : TBL.crown2[fi];
     ctx.fillStyle = crownColor;
 
-    var w1 = size * 0.30;
-    ctx.beginPath();
-    ctx.moveTo(x, groundY - size);
-    ctx.lineTo(x + w1, groundY - size * 0.42);
-    ctx.lineTo(x - w1, groundY - size * 0.42);
-    ctx.closePath();
-    ctx.fill();
+    if (kind === 'fir') {
+      // три яруса ёлки
+      for (var k = 0; k < 3; k++) {
+        var top = groundY - size * (1 - k * 0.22);
+        var bot = groundY - size * (0.66 - k * 0.26);
+        var half = size * (0.16 + k * 0.09);
+        ctx.beginPath();
+        ctx.moveTo(x, top);
+        ctx.lineTo(x + half, bot);
+        ctx.lineTo(x - half, bot);
+        ctx.closePath();
+        ctx.fill();
+      }
+    } else {
+      // два яруса — сосна/лиственное
+      var w1 = size * 0.30;
+      ctx.beginPath();
+      ctx.moveTo(x, groundY - size);
+      ctx.lineTo(x + w1, groundY - size * 0.42);
+      ctx.lineTo(x - w1, groundY - size * 0.42);
+      ctx.closePath(); ctx.fill();
 
-    var w2 = size * 0.38;
-    ctx.beginPath();
-    ctx.moveTo(x, groundY - size * 0.72);
-    ctx.lineTo(x + w2, groundY - size * 0.14);
-    ctx.lineTo(x - w2, groundY - size * 0.14);
-    ctx.closePath();
-    ctx.fill();
+      var w2 = size * 0.38;
+      ctx.beginPath();
+      ctx.moveTo(x, groundY - size * 0.72);
+      ctx.lineTo(x + w2, groundY - size * 0.14);
+      ctx.lineTo(x - w2, groundY - size * 0.14);
+      ctx.closePath(); ctx.fill();
+    }
   }
 
+  /* ==================== отрисовка мира ==================== */
   function render() {
     var base = Math.floor(position / SEG_LEN);
     var basePercent = (position - base * SEG_LEN) / SEG_LEN;
     var playerY = yAt(base) + (yAt(base + 1) - yAt(base)) * basePercent;
     var camY = playerY + CAM_HEIGHT;
-    var camX = playerX * ROAD_WIDTH;
+    var camX = playerX * ROAD_WIDTH + shiftK * 8;
+
+    var r = REGIONS[regionIdx];
+    var prof = PROFILES[r.profile];
 
     var horizonY = H * 0.42;
     drawSky(horizonY);
@@ -406,8 +614,9 @@
     var x = 0;
     var dx = -(curveAt(base) * basePercent);
     var trees = [];
+    var fogMax = DRAW_FOG;
 
-    for (var n = 0; n < DRAW_DIST; n++) {
+    for (var n = 0; n < fogMax; n++) {
       var i = base + n;
       var curve = curveAt(i);
       var z1 = i * SEG_LEN - position;
@@ -423,44 +632,48 @@
       if (p2.y >= p1.y) continue;
       if (p2.y >= maxy) continue;
 
-      var fogK = Math.min(1, Math.pow(n / DRAW_DIST, 1.25));
+      var fogK = Math.min(1, Math.pow(n / fogMax, 1.15));
       var fi = fogIndex(fogK);
       var dark = Math.floor(i / RUMBLE_LEN) % 2 === 0 ? 0 : 1;
 
-      // трава
+      // земля
       ctx.fillStyle = TBL.grass[dark][fi];
       ctx.fillRect(0, p2.y, W, p1.y - p2.y + 1);
 
-      // обочина шире полотна
-      var r1 = p1.w * 1.10, r2 = p2.w * 1.10;
+      // обочина
+      var r1 = p1.w * prof.rumbleK, r2 = p2.w * prof.rumbleK;
       poly([[p1.x - r1, p1.y], [p1.x + r1, p1.y],
             [p2.x + r2, p2.y], [p2.x - r2, p2.y]], TBL.rumble[dark][fi]);
 
       // полотно
-      poly([[p1.x - p1.w, p1.y], [p1.x + p1.w, p1.y],
-            [p2.x + p2.w, p2.y], [p2.x - p2.w, p2.y]], TBL.road[dark][fi]);
+      var w1 = p1.w * prof.roadK, w2 = p2.w * prof.roadK;
+      poly([[p1.x - w1, p1.y], [p1.x + w1, p1.y],
+            [p2.x + w2, p2.y], [p2.x - w2, p2.y]], TBL.road[dark][fi]);
 
-      // центральная прерывистая разметка
-      if (Math.floor(i / RUMBLE_LEN) % 2 === 0) {
-        var lw1 = Math.max(0.6, p1.w * 0.022);
-        var lw2 = Math.max(0.4, p2.w * 0.022);
-        poly([[p1.x - lw1, p1.y], [p1.x + lw1, p1.y],
-              [p2.x + lw2, p2.y], [p2.x - lw2, p2.y]], TBL.line[fi]);
+      // разметка
+      if (prof.center) {
+        var showCenter = prof.centerStyle === 'solid' || (Math.floor(i / RUMBLE_LEN) % 2 === 0);
+        if (showCenter) {
+          var lw1 = Math.max(0.6, w1 * 0.022);
+          var lw2 = Math.max(0.4, w2 * 0.022);
+          poly([[p1.x - lw1, p1.y], [p1.x + lw1, p1.y],
+                [p2.x + lw2, p2.y], [p2.x - lw2, p2.y]], TBL.line[fi]);
+        }
       }
 
       // краевые линии
-      if (p1.w > 3) {
-        var ew1 = Math.max(0.5, p1.w * 0.016);
-        var ew2 = Math.max(0.4, p2.w * 0.016);
-        var off1 = p1.w * 0.93, off2 = p2.w * 0.93;
-        poly([[p1.x - off1 - ew1, p1.y], [p1.x - off1 + ew1, p1.y],
-              [p2.x - off2 + ew2, p2.y], [p2.x - off2 - ew2, p2.y]], TBL.line[fi]);
-        poly([[p1.x + off1 - ew1, p1.y], [p1.x + off1 + ew1, p1.y],
-              [p2.x + off2 + ew2, p2.y], [p2.x + off2 - ew2, p2.y]], TBL.line[fi]);
+      if (w1 > 3) {
+        var ew1 = Math.max(0.5, w1 * 0.016);
+        var ew2 = Math.max(0.4, w2 * 0.016);
+        var o1 = w1 * prof.edge, o2 = w2 * prof.edge;
+        poly([[p1.x - o1 - ew1, p1.y], [p1.x - o1 + ew1, p1.y],
+              [p2.x - o2 + ew2, p2.y], [p2.x - o2 - ew2, p2.y]], TBL.line[fi]);
+        poly([[p1.x + o1 - ew1, p1.y], [p1.x + o1 + ew1, p1.y],
+              [p2.x + o2 + ew2, p2.y], [p2.x + o2 - ew2, p2.y]], TBL.line[fi]);
       }
 
-      // деревья вдоль дороги
-      if (n > 2 && hash(i) < 0.42) {
+      // деревья — детерминированно от номера сегмента
+      if (n > 2 && hash(i) < r.treeDensity) {
         var side = hash(i + 0.5) < 0.5 ? -1 : 1;
         var offsetK = 1.35 + hash(i + 1.7) * 2.4;
         trees.push({
@@ -468,8 +681,7 @@
           y: p1.y,
           size: p1.w * (0.85 + hash(i + 3.3) * 0.5),
           fi: fi,
-          seed: hash(i + 5.1),
-          depth: n
+          seed: hash(i + 5.1)
         });
       }
 
@@ -479,75 +691,92 @@
     // деревья — от дальних к ближним
     for (var t = trees.length - 1; t >= 0; t--) {
       var tr = trees[t];
-      if (tr.size < 1.2) continue;
-      drawTree(tr.x, tr.y, tr.size, tr.fi, tr.seed);
+      drawTree(tr.x, tr.y, tr.size, tr.fi, tr.seed, r.treeKind);
     }
 
-    // машина игрока
     drawPlayer();
+    drawParticles();
+
+    // цветовой тинт времени суток
+    var tm = TIMES[timeIdx];
+    if (timeIdx !== 0) {
+      ctx.fillStyle = tm.tint;
+      ctx.fillRect(0, 0, W, H);
+    }
+    // лёгкая виньетка
+    var vg = ctx.createRadialGradient(W / 2, H * 0.55, Math.min(W, H) * 0.25,
+                                      W / 2, H * 0.55, Math.max(W, H) * 0.8);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.28)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
   }
 
+  /* ==================== машина ==================== */
   function drawPlayer() {
-    var base = Math.floor(position / SEG_LEN);
-    var yB = yAt(base);
     var speedK = speed / MAX_SPEED;
     var carW = Math.min(W * 0.26, 150);
     var carH = carW * 0.42;
     var cx = W / 2;
     var cy = H * 0.93;
+    var tilt = -playerX * 0.05;   // лёгкий крен при смещении
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(tilt);
 
     // тень
     ctx.fillStyle = 'rgba(0,0,0,0.28)';
     ctx.beginPath();
-    ctx.ellipse(cx, cy + carH * 0.55, carW * 0.55, carH * 0.22, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, carH * 0.55, carW * 0.55, carH * 0.22, 0, 0, Math.PI * 2);
     ctx.fill();
 
     // кузов
-    var bodyGrad = ctx.createLinearGradient(cx, cy - carH, cx, cy + carH);
+    var bodyGrad = ctx.createLinearGradient(0, -carH, 0, carH);
     bodyGrad.addColorStop(0, '#e2564c');
     bodyGrad.addColorStop(1, '#a8332c');
     ctx.fillStyle = bodyGrad;
     ctx.beginPath();
-    ctx.moveTo(cx - carW / 2, cy + carH * 0.42);
-    ctx.lineTo(cx - carW * 0.40, cy - carH * 0.22);
-    ctx.lineTo(cx + carW * 0.40, cy - carH * 0.22);
-    ctx.lineTo(cx + carW / 2, cy + carH * 0.42);
+    ctx.moveTo(-carW / 2, carH * 0.42);
+    ctx.lineTo(-carW * 0.40, -carH * 0.22);
+    ctx.lineTo(carW * 0.40, -carH * 0.22);
+    ctx.lineTo(carW / 2, carH * 0.42);
     ctx.closePath();
     ctx.fill();
 
     // крыша
     ctx.fillStyle = '#1d2733';
     ctx.beginPath();
-    ctx.moveTo(cx - carW * 0.28, cy - carH * 0.20);
-    ctx.lineTo(cx - carW * 0.20, cy - carH * 0.60);
-    ctx.lineTo(cx + carW * 0.20, cy - carH * 0.60);
-    ctx.lineTo(cx + carW * 0.28, cy - carH * 0.20);
+    ctx.moveTo(-carW * 0.28, -carH * 0.20);
+    ctx.lineTo(-carW * 0.20, -carH * 0.60);
+    ctx.lineTo(carW * 0.20, -carH * 0.60);
+    ctx.lineTo(carW * 0.28, -carH * 0.20);
     ctx.closePath();
     ctx.fill();
 
-    // блик на крыше
     ctx.fillStyle = 'rgba(255,255,255,0.12)';
-    ctx.fillRect(cx - carW * 0.17, cy - carH * 0.58, carW * 0.34, carH * 0.08);
+    ctx.fillRect(-carW * 0.17, -carH * 0.58, carW * 0.34, carH * 0.08);
 
     // задние фонари
-    ctx.fillStyle = '#ff6b5e';
-    ctx.fillRect(cx - carW * 0.46, cy + carH * 0.10, carW * 0.14, carH * 0.12);
-    ctx.fillRect(cx + carW * 0.32, cy + carH * 0.10, carW * 0.14, carH * 0.12);
+    var night = timeIdx === 2;
+    ctx.fillStyle = night ? '#ff8a7e' : '#ff6b5e';
+    ctx.fillRect(-carW * 0.46, carH * 0.10, carW * 0.14, carH * 0.12);
+    ctx.fillRect(carW * 0.32, carH * 0.10, carW * 0.14, carH * 0.12);
 
     // колёса
     ctx.fillStyle = '#14161a';
-    ctx.fillRect(cx - carW * 0.52, cy + carH * 0.18, carW * 0.10, carH * 0.34);
-    ctx.fillRect(cx + carW * 0.42, cy + carH * 0.18, carW * 0.10, carH * 0.34);
+    ctx.fillRect(-carW * 0.52, carH * 0.18, carW * 0.10, carH * 0.34);
+    ctx.fillRect(carW * 0.42, carH * 0.18, carW * 0.10, carH * 0.34);
 
-    // «дым» из-под колёс на скорости
+    // «пыль» из-под колёс
     if (speedK > 0.55) {
       ctx.fillStyle = 'rgba(255,255,255,' + (0.05 + speedK * 0.05) + ')';
       var dustW = carW * (0.5 + Math.sin(performance.now() * 0.006) * 0.15);
       ctx.beginPath();
-      ctx.ellipse(cx, cy + carH * 0.5, dustW, carH * 0.12, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, carH * 0.5, dustW, carH * 0.12, 0, 0, Math.PI * 2);
       ctx.fill();
     }
-    void yB;
+    ctx.restore();
   }
 
   /* ==================== HUD ==================== */
